@@ -91,6 +91,15 @@ ChannelStrip::ChannelStrip (IRConsoleProcessor& p, int i)
         else choose();
     };
     addAndMakeVisible (irButton);
+    for (auto* b : { &prevButton, &nextButton })
+    {
+        b->setColour (juce::TextButton::buttonColourId, Colours::panelDark);
+        addAndMakeVisible (b);
+    }
+    prevButton.setTooltip ("Previous IR in this folder (or scroll over the IR name / waveform)");
+    nextButton.setTooltip ("Next IR in this folder (or scroll over the IR name / waveform)");
+    prevButton.onClick = [this] { step (-1); };
+    nextButton.onClick = [this] { step (+1); };
 
     for (auto* k : { &hpf, &lpf, &hiG, &hiF, &midG, &midF, &midQ, &align, &loG, &loF, &pan })
         addAndMakeVisible (k);
@@ -119,6 +128,15 @@ void ChannelStrip::refreshIR()
     auto ir = proc.getIR (index);
     thumbPath.clear();
     isStereoIR = ir != nullptr && ir->data.getNumChannels() > 1;
+    positionText = {};
+    if (ir != nullptr)
+    {
+        int pos = 0, count = 0;
+        if (stepIR (juce::File (ir->path), 0, &pos, &count) != juce::File())
+            positionText = juce::String (pos + 1) + " / " + juce::String (count);
+    }
+    prevButton.setEnabled (positionText.isNotEmpty());
+    nextButton.setEnabled (positionText.isNotEmpty());
     if (ir == nullptr)
     {
         irButton.setButtonText ("LOAD IR");
@@ -152,8 +170,10 @@ void ChannelStrip::refreshIR()
 
 void ChannelStrip::choose()
 {
+    juce::File start;
+    if (auto ir = proc.getIR (index)) start = juce::File (ir->path).getParentDirectory();
     chooser = std::make_unique<juce::FileChooser> ("Load IR for channel " + juce::String (index + 1),
-                                                   juce::File(), "*.wav;*.aif;*.aiff;*.flac");
+                                                   start, "*.wav;*.aif;*.aiff;*.flac");
     chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
                           [safe = juce::Component::SafePointer<ChannelStrip> (this)] (const juce::FileChooser& fc)
                           {
@@ -163,14 +183,64 @@ void ChannelStrip::choose()
 
 void ChannelStrip::showMenu()
 {
+    // The menu doubles as a library browser: every IR in this folder, plus the
+    // neighbouring folders (other mics / cabs in the same library).
+    auto files = std::make_shared<juce::Array<juce::File>>();
     juce::PopupMenu m;
-    m.addItem (1, "Load IR...");
-    m.addItem (2, "Clear channel", proc.getIR (index) != nullptr);
+    const auto ir = proc.getIR (index);
+    const juce::File current = ir != nullptr ? juce::File (ir->path) : juce::File();
+    constexpr int fileBase = 1000, maxFiles = 3000;
+
+    auto addFolder = [&] (juce::PopupMenu& menu, const juce::File& folder)
+    {
+        for (auto& f : findIRsInFolder (folder))
+        {
+            if (files->size() >= maxFiles) break;
+            files->add (f);
+            menu.addItem (fileBase + files->size() - 1, f.getFileNameWithoutExtension(), true, f == current);
+        }
+    };
+
+    if (current.existsAsFile())
+    {
+        const auto folder = current.getParentDirectory();
+        m.addSectionHeader (folder.getFileName());
+        addFolder (m, folder);
+
+        juce::PopupMenu library;
+        const auto root = folder.getParentDirectory();
+        auto dirs = root.findChildFiles (juce::File::findDirectories, false);
+        struct NaturalOrder
+        { static int compareElements (const juce::File& a, const juce::File& b) { return a.getFileName().compareNatural (b.getFileName()); } } order;
+        dirs.sort (order);
+        for (auto& d : dirs)
+        {
+            juce::PopupMenu sub;
+            addFolder (sub, d);
+            if (sub.getNumItems() > 0)
+                library.addSubMenu (d.getFileName(), sub, true, nullptr, d == folder);
+        }
+        if (library.getNumItems() > 0)
+        {
+            m.addSeparator();
+            m.addSubMenu ("Library: " + root.getFileName(), library);
+        }
+        m.addSeparator();
+    }
+    else if (ir != nullptr)
+    {
+        m.addItem (-1, "Original file not found - browsing unavailable", false);
+        m.addSeparator();
+    }
+
+    m.addItem (1, "Load IR from disk...");
+    m.addItem (2, "Clear channel", ir != nullptr);
     m.addItem (3, "Reset channel controls");
-    m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (irButton),
-                     [safe = juce::Component::SafePointer<ChannelStrip> (this)] (int r)
+    m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (irButton).withMaximumNumColumns (1),
+                     [safe = juce::Component::SafePointer<ChannelStrip> (this), files] (int r)
                      {
                          if (safe == nullptr) return;
+                         if (r >= fileBase && r - fileBase < files->size()) safe->loadFile ((*files)[r - fileBase]);
                          if (r == 1) safe->choose();
                          if (r == 2) safe->proc.clearIR (safe->index);
                          if (r == 3)
@@ -179,6 +249,34 @@ void ChannelStrip::showMenu()
                                      if (rp->getParameterID().startsWith (IRConsoleProcessor::chId (safe->index, "")))
                                          rp->setValueNotifyingHost (rp->getDefaultValue());
                      });
+}
+
+void ChannelStrip::step (int delta)
+{
+    auto ir = proc.getIR (index);
+    if (ir == nullptr) return;
+    const auto next = stepIR (juce::File (ir->path), delta);
+    if (next != juce::File() && next.getFullPathName() != ir->path)
+        loadFile (next);
+}
+
+void ChannelStrip::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& w)
+{
+    // Scrolling over the IR name or waveform steps through the folder, like moving the mic.
+    const auto pos = e.getEventRelativeTo (this).getPosition();
+    const auto browseArea = irButton.getBounds().getUnion (thumbArea).getUnion (prevButton.getBounds()).getUnion (nextButton.getBounds());
+    if (! browseArea.contains (pos))
+    {
+        Component::mouseWheelMove (e, w);
+        return;
+    }
+    wheelAccum += w.deltaY * (w.isReversed ? -1.0f : 1.0f);
+    const float threshold = w.isSmooth ? 0.25f : 0.05f;   // trackpads send many small deltas
+    if (std::abs (wheelAccum) >= threshold)
+    {
+        step (wheelAccum > 0 ? -1 : +1);   // scroll down = next IR
+        wheelAccum = 0.0f;
+    }
 }
 
 void ChannelStrip::loadFile (const juce::File& f)
@@ -198,20 +296,24 @@ void ChannelStrip::filesDropped (const juce::StringArray& files, int, int)
 void ChannelStrip::paint (juce::Graphics& g)
 {
     auto r = getLocalBounds().toFloat().reduced (2.0f);
-    g.setColour (Colours::strip);
-    g.fillRoundedRectangle (r, 5.0f);
-    g.setColour (dragOver ? Colours::accent : Colours::stripEdge);
-    g.drawRoundedRectangle (r, 5.0f, dragOver ? 2.0f : 1.0f);
+    juce::ColourGradient paintGrad (Colours::strip.brighter (0.06f), r.getX(), r.getY(), Colours::strip.darker (0.12f), r.getRight(), r.getY(), false);
+    g.setGradientFill (paintGrad);
+    g.fillRoundedRectangle (r, 3.0f);
+    g.setColour (juce::Colours::white.withAlpha (0.07f));
+    g.drawVerticalLine ((int) r.getX() + 1, r.getY() + 3, r.getBottom() - 3);
+    g.setColour (dragOver ? Colours::accent : juce::Colours::black.withAlpha (0.65f));
+    g.drawRoundedRectangle (r, 3.0f, dragOver ? 2.0f : 1.0f);
+    drawScrew (g, { r.getCentreX(), r.getY() + 8.0f }, 3.0f, (float) index * 0.7f);
 
     // Channel number badge.
     g.setColour (Colours::accent);
     g.setFont (juce::FontOptions (15.0f, juce::Font::bold));
-    g.drawText (juce::String (index + 1), getLocalBounds().removeFromTop (24).reduced (8, 0), juce::Justification::centredLeft);
+    g.drawText (juce::String (index + 1), getLocalBounds().removeFromTop (26).reduced (9, 0), juce::Justification::centredLeft);
     g.setColour (Colours::textDim);
     g.setFont (juce::FontOptions (10.0f, juce::Font::bold));
     auto ir = proc.getIR (index);
     g.drawText (ir == nullptr ? "EMPTY" : (isStereoIR ? "STEREO IR" : "MONO IR"),
-                getLocalBounds().removeFromTop (24).reduced (8, 0), juce::Justification::centredRight);
+                getLocalBounds().removeFromTop (26).reduced (9, 0), juce::Justification::centredRight);
 
     // Waveform thumbnail.
     g.setColour (Colours::panelDark);
@@ -220,6 +322,12 @@ void ChannelStrip::paint (juce::Graphics& g)
     {
         g.setColour (Colours::accent.withAlpha (0.85f));
         g.strokePath (thumbPath, juce::PathStrokeType (1.0f));
+        if (positionText.isNotEmpty())
+        {
+            g.setColour (Colours::text.withAlpha (0.8f));
+            g.setFont (juce::FontOptions (9.5f, juce::Font::bold));
+            g.drawText (positionText, thumbArea.reduced (3, 1), juce::Justification::bottomRight);
+        }
     }
     else
     {
@@ -238,8 +346,13 @@ void ChannelStrip::paint (juce::Graphics& g)
 void ChannelStrip::resized()
 {
     auto r = getLocalBounds().reduced (6, 4);
-    r.removeFromTop (22);
-    irButton.setBounds (r.removeFromTop (24));
+    r.removeFromTop (24);
+    {
+        auto nameRow = r.removeFromTop (24);
+        prevButton.setBounds (nameRow.removeFromLeft (18));
+        nextButton.setBounds (nameRow.removeFromRight (18));
+        irButton.setBounds (nameRow.reduced (2, 0));
+    }
     r.removeFromTop (4);
     thumbArea = r.removeFromTop (34);
     r.removeFromTop (6);
@@ -569,6 +682,127 @@ void ExportPanel::resized()
 }
 
 //==============================================================================
+float VUMeter::positionForDb (float vuDb)
+{
+    // Classic VU scale: needle travel is proportional to voltage, full scale = +3 VU.
+    return std::pow (10.0f, vuDb / 20.0f) / std::pow (10.0f, 3.0f / 20.0f);
+}
+
+void VUMeter::update (float rms, float peak, float dt)
+{
+    const float vuDb = juce::Decibels::gainToDecibels (rms, -80.0f) + 18.0f;
+    const float target = juce::jlimit (0.0f, 1.08f, positionForDb (vuDb));
+    // Spring/damper needle: ~300 ms rise with a touch of overshoot, like a real movement.
+    const int sub = 8;
+    const float h = dt / sub, w = 11.0f, zeta = 0.72f;
+    for (int i = 0; i < sub; ++i)
+    {
+        const float acc = w * w * (target - pos) - 2.0f * zeta * w * vel;
+        vel += acc * h;
+        pos += vel * h;
+        if (pos < 0.0f) { pos = 0.0f; vel = 0.0f; }
+        if (pos > 1.1f) { pos = 1.1f; vel = 0.0f; }   // pin stop
+    }
+    peakHold = peak > juce::Decibels::decibelsToGain (-1.0f) ? 0.6f : juce::jmax (0.0f, peakHold - dt);
+    repaint();
+}
+
+void VUMeter::paint (juce::Graphics& g)
+{
+    auto r = getLocalBounds().toFloat();
+
+    // Bakelite bezel.
+    g.setColour (juce::Colours::black.withAlpha (0.5f));
+    g.fillRoundedRectangle (r.translated (2, 3), 7.0f);
+    juce::ColourGradient bezel (juce::Colour (0xff35322d), r.getX(), r.getY(), juce::Colour (0xff121110), r.getX(), r.getBottom(), false);
+    g.setGradientFill (bezel);
+    g.fillRoundedRectangle (r, 7.0f);
+    auto face = r.reduced (9.0f);
+
+    // Warm backlit face.
+    juce::ColourGradient glow (juce::Colour (0xfffff0c0), face.getCentreX(), face.getBottom(),
+                               juce::Colour (0xffd9c48e), face.getX(), face.getY(), true);
+    g.setGradientFill (glow);
+    g.fillRoundedRectangle (face, 3.0f);
+
+    g.saveState();
+    g.reduceClipRegion (face.toNearestInt());
+    const juce::Point<float> pivot (face.getCentreX(), face.getBottom() + face.getHeight() * 0.42f);
+    const float radius = face.getHeight() * 1.12f;
+    const float a0 = juce::degreesToRadians (-47.0f), a1 = juce::degreesToRadians (47.0f);
+    auto angleFor = [&] (float p) { return a0 + p * (a1 - a0); };
+    auto onArc = [&] (float angle, float rad) { return juce::Point<float> (pivot.x + std::sin (angle) * rad, pivot.y - std::cos (angle) * rad); };
+
+    const auto ink = juce::Colour (0xff1c1a16), red = juce::Colour (0xffc0281e);
+    // Scale arc: black up to 0 VU, red above.
+    const float zero = positionForDb (0.0f);
+    juce::Path arcBlack, arcRed;
+    arcBlack.addCentredArc (pivot.x, pivot.y, radius, radius, 0.0f, angleFor (positionForDb (-20.0f)), angleFor (zero), true);
+    arcRed.addCentredArc (pivot.x, pivot.y, radius, radius, 0.0f, angleFor (zero), angleFor (1.0f), true);
+    g.setColour (ink);  g.strokePath (arcBlack, juce::PathStrokeType (1.4f));
+    g.setColour (red);  g.strokePath (arcRed, juce::PathStrokeType (4.0f));
+
+    g.setFont (juce::FontOptions (10.5f, juce::Font::bold));
+    for (float db : { -20.0f, -10.0f, -7.0f, -5.0f, -3.0f, -2.0f, -1.0f, 0.0f, 1.0f, 2.0f, 3.0f })
+    {
+        const float ang = angleFor (positionForDb (db));
+        const bool major = db == -20.0f || db == -10.0f || db == -7.0f || db == -5.0f || db == -3.0f || db >= -1.0f;
+        g.setColour (db > 0.0f ? red : ink);
+        g.drawLine (juce::Line<float> (onArc (ang, radius), onArc (ang, radius + (major ? 9.0f : 5.0f))), 1.3f);
+        if (db == -2.0f) continue;   // too crowded to label
+        const auto lp = onArc (ang, radius + 17.0f);
+        const juce::String txt = db > 0 ? "+" + juce::String ((int) db) : juce::String ((int) std::abs (db));
+        g.drawText (txt, juce::Rectangle<float> (26, 12).withCentre (lp), juce::Justification::centred);
+    }
+    // Minor ticks below the arc (percent-style scale).
+    g.setColour (ink.withAlpha (0.7f));
+    for (int pct = 0; pct <= 100; pct += 10)
+    {
+        const float ang = angleFor (pct / 100.0f * zero);
+        g.drawLine (juce::Line<float> (onArc (ang, radius - 2.0f), onArc (ang, radius - 6.0f)), 1.0f);
+    }
+    g.setColour (ink);
+    g.setFont (juce::FontOptions (22.0f, juce::Font::bold));
+    g.drawText ("VU", face.withTrimmedTop (face.getHeight() * 0.5f).withTrimmedBottom (6), juce::Justification::centred);
+    g.setFont (juce::FontOptions (9.0f, juce::Font::bold));
+    g.setColour (ink.withAlpha (0.75f));
+    g.drawText (name, face.reduced (6, 4), juce::Justification::bottomLeft);
+    g.drawText ("0 VU = -18 dBFS", face.reduced (6, 4), juce::Justification::bottomRight);
+
+    // Needle with shadow.
+    const float ang = angleFor (pos);
+    const auto tip = onArc (ang, radius + 12.0f);
+    g.setColour (juce::Colours::black.withAlpha (0.18f));
+    g.drawLine (juce::Line<float> (pivot.translated (3, 3), tip.translated (3, 3)), 1.8f);
+    g.setColour (juce::Colour (0xff111111));
+    g.drawLine (juce::Line<float> (pivot, tip), 1.5f);
+    g.restoreState();
+
+    // Needle housing.
+    auto housing = juce::Rectangle<float> (face.getWidth() * 0.34f, 12.0f).withCentre ({ face.getCentreX(), face.getBottom() - 2.0f });
+    g.setColour (juce::Colour (0xff1a1917));
+    g.fillRoundedRectangle (housing.withTrimmedBottom (4.0f).translated (0, 2), 5.0f);
+
+    // Glass reflection.
+    juce::ColourGradient glass (juce::Colours::white.withAlpha (0.16f), face.getX(), face.getY(),
+                                juce::Colours::white.withAlpha (0.0f), face.getX(), face.getCentreY(), false);
+    g.setGradientFill (glass);
+    g.fillRoundedRectangle (face.withHeight (face.getHeight() * 0.45f), 3.0f);
+
+    // Peak LED.
+    auto led = juce::Rectangle<float> (8, 8).withCentre ({ face.getRight() - 10.0f, face.getY() + 10.0f });
+    g.setColour (peakHold > 0 ? red.brighter (0.4f) : juce::Colour (0xff4a1612));
+    g.fillEllipse (led);
+    if (peakHold > 0) { g.setColour (red.withAlpha (0.35f)); g.fillEllipse (led.expanded (4)); }
+    g.setColour (juce::Colours::black.withAlpha (0.6f));
+    g.drawEllipse (led, 0.8f);
+
+    for (auto pt : { r.getTopLeft().translated (5, 5), r.getTopRight().translated (-5, 5),
+                     r.getBottomLeft().translated (5, -5), r.getBottomRight().translated (-5, -5) })
+        drawScrew (g, pt, 2.6f, pt.x * 0.1f);
+}
+
+//==============================================================================
 ConsoleView::ConsoleView (IRConsoleProcessor& p)
     : proc (p), response (p),
       stereo (p.apvts, "stereo", "STEREO", Colours::accent),
@@ -641,6 +875,8 @@ ConsoleView::ConsoleView (IRConsoleProcessor& p)
     blendInfo.setColour (juce::Label::textColourId, Colours::textDim);
     blendInfo.setJustificationType (juce::Justification::centred);
     addAndMakeVisible (blendInfo);
+    addAndMakeVisible (vuL);
+    addAndMakeVisible (vuR);
 
     setSize (designW, designH);
     startTimerHz (30);
@@ -662,45 +898,75 @@ void ConsoleView::timerCallback()
         else blendInfo.setText ("Blend: " + juce::String (d.lengthSamples) + " samples (" + juce::String (d.lengthSamples * 1000.0 / d.sampleRate, 1)
                                 + " ms) " + (d.stereo ? "stereo" : "mono"), juce::dontSendNotification);
     }
-    auto toDb = [] (float v) { return juce::jlimit (0.0f, 1.0f, (juce::Decibels::gainToDecibels (v, -60.0f) + 60.0f) / 66.0f); };
-    const float l = toDb (proc.getOutputPeak (0)), r = toDb (proc.getOutputPeak (1));
-    if (std::abs (l - meterL) > 0.003f || std::abs (r - meterR) > 0.003f)
-    {
-        meterL = l; meterR = r;
-        repaint (meterArea);
-    }
+    vuL.update (proc.getOutputRms (0), proc.getOutputPeak (0), 1.0f / 30.0f);
+    vuR.update (proc.getOutputRms (1), proc.getOutputPeak (1), 1.0f / 30.0f);
 }
 
 void ConsoleView::paint (juce::Graphics& g)
 {
     g.fillAll (Colours::panelDark);
+    const auto full = getLocalBounds().toFloat();
 
-    // Top bar.
-    auto top = getLocalBounds().removeFromTop (46);
-    g.setColour (Colours::panel);
-    g.fillRect (top);
-    g.setColour (Colours::accent);
-    g.setFont (juce::FontOptions (22.0f, juce::Font::bold));
-    g.drawText ("IR CONSOLE", top.reduced (16, 0), juce::Justification::centredLeft);
-    g.setColour (Colours::textDim);
-    g.setFont (juce::FontOptions (12.0f));
-    g.drawText ("8-CHANNEL CAB IR MIXER", top.reduced (16, 0).withTrimmedLeft (150), juce::Justification::centredLeft);
+    // Walnut side cheeks and front rail.
+    drawWood (g, full.withWidth (22.0f), true);
+    drawWood (g, full.withLeft (full.getRight() - 22.0f), true);
+    drawWood (g, full.withTop (full.getBottom() - 16.0f).reduced (22.0f, 0), false);
 
-    // Master section.
+    // Meter bridge: dark painted steel with a walnut cap.
+    auto bridge = bridgeArea.toFloat();
+    drawWood (g, bridge.withHeight (12.0f), false);
+    auto bridgeFace = bridge.withTrimmedTop (12.0f);
+    juce::ColourGradient bf (Colours::panel.brighter (0.08f), 0, bridgeFace.getY(), Colours::panel.darker (0.4f), 0, bridgeFace.getBottom(), false);
+    g.setGradientFill (bf);
+    g.fillRect (bridgeFace);
+    g.setColour (juce::Colours::black.withAlpha (0.6f));
+    g.drawHorizontalLine ((int) bridgeFace.getBottom() - 1, bridgeFace.getX(), bridgeFace.getRight());
+
+    // Engraved nameplate.
+    auto plate = plateArea.toFloat();
+    juce::ColourGradient brass (juce::Colour (0xffd9c08a), plate.getX(), plate.getY(), juce::Colour (0xff8d7440), plate.getX(), plate.getBottom(), false);
+    g.setColour (juce::Colours::black.withAlpha (0.5f));
+    g.fillRoundedRectangle (plate.translated (2, 3), 4.0f);
+    g.setGradientFill (brass);
+    g.fillRoundedRectangle (plate, 4.0f);
+    g.setColour (juce::Colour (0xff5b4a28));
+    g.drawRoundedRectangle (plate.reduced (4.0f), 2.0f, 1.0f);
+    auto txt = plate.reduced (18.0f, 8.0f);
+    g.setColour (juce::Colour (0xff2b2416));
+    g.setFont (juce::FontOptions (30.0f, juce::Font::bold));
+    g.drawText ("IR  CONSOLE", txt.removeFromTop (txt.getHeight() * 0.62f), juce::Justification::centred);
+    g.setFont (juce::FontOptions (11.0f, juce::Font::bold));
+    g.drawText ("EIGHT  CHANNEL  CABINET  IMPULSE  MIXER", txt, juce::Justification::centred);
+    for (auto pt : { plate.getTopLeft().translated (9, 9), plate.getTopRight().translated (-9, 9),
+                     plate.getBottomLeft().translated (9, -9), plate.getBottomRight().translated (-9, -9) })
+        drawScrew (g, pt, 3.0f, pt.y * 0.07f);
+
+    // Channel area tub.
+    g.setColour (juce::Colours::black.withAlpha (0.35f));
+    g.fillRect (stripsArea.toFloat().expanded (2.0f));
+
+    // Master module.
+    auto ma = masterArea.toFloat();
     g.setColour (Colours::strip);
-    g.fillRoundedRectangle (masterArea.toFloat(), 5.0f);
-    g.setColour (Colours::stripEdge);
-    g.drawRoundedRectangle (masterArea.toFloat(), 5.0f, 1.0f);
+    g.fillRoundedRectangle (ma, 4.0f);
+    g.setColour (juce::Colours::white.withAlpha (0.06f));
+    g.drawHorizontalLine ((int) ma.getY() + 1, ma.getX() + 4, ma.getRight() - 4);
+    g.setColour (juce::Colours::black.withAlpha (0.6f));
+    g.drawRoundedRectangle (ma, 4.0f, 1.2f);
+    for (auto pt : { ma.getTopLeft().translated (8, 8), ma.getTopRight().translated (-8, 8),
+                     ma.getBottomLeft().translated (8, -8), ma.getBottomRight().translated (-8, -8) })
+        drawScrew (g, pt, 3.2f, pt.x * 0.05f);
 
-    drawSectionLabel (g, pushArea.withHeight (16).translated (0, -18), "SPEAKER PUSH");
-    drawSectionLabel (g, eqArea.withHeight (16).translated (0, -20), "MASTER 10-BAND GRAPHIC EQ");
+    drawSectionLabel (g, pushArea.withHeight (16).translated (0, -20), "SPEAKER PUSH");
+    drawSectionLabel (g, eqArea.withHeight (16).translated (0, -22), "MASTER GRAPHIC EQUALISER");
+    drawSectionLabel (g, output.getBounds().withHeight (16).translated (0, -22), "MASTER");
 
     // EQ scale and band labels.
     if (! eqSliders.isEmpty())
     {
         auto* first = eqSliders.getFirst();
-        const float top = first->getY() + 15.0f, bot = first->getBottom() - 15.0f;   // matches slider travel
-        g.setFont (juce::FontOptions (9.5f));
+        const float top = first->getY() + 15.0f, bot = first->getBottom() - 15.0f;
+        g.setFont (juce::FontOptions (9.5f, juce::Font::bold));
         for (int db : { 12, 6, 0, -6, -12 })
         {
             const float y = juce::jmap ((float) db, 12.0f, -12.0f, top, bot);
@@ -710,50 +976,55 @@ void ConsoleView::paint (juce::Graphics& g)
         g.setFont (juce::FontOptions (10.0f, juce::Font::bold));
         for (int b = 0; b < numEqBands; ++b)
         {
-            auto* s = eqSliders[b];
+            auto* sl = eqSliders[b];
             g.setColour (Colours::text);
-            g.drawText (formatHz (eqBandFreqs[(size_t) b]), s->getBounds().withY (s->getBottom() + 2).withHeight (14).expanded (6, 0), juce::Justification::centred);
+            g.drawText (formatHz (eqBandFreqs[(size_t) b]), sl->getBounds().withY (sl->getBottom() + 2).withHeight (14).expanded (6, 0), juce::Justification::centred);
         }
-    }
-
-    // Output meter.
-    drawSectionLabel (g, output.getBounds().withRight (meterArea.getRight()).withHeight (16).translated (0, -22), "OUTPUT");
-    auto m = meterArea.toFloat();
-    const float bw = (m.getWidth() - 3.0f) / 2.0f;
-    for (int ch = 0; ch < 2; ++ch)
-    {
-        auto bar = juce::Rectangle<float> (m.getX() + ch * (bw + 3.0f), m.getY(), bw, m.getHeight());
-        g.setColour (juce::Colours::black);
-        g.fillRect (bar);
-        const float v = ch == 0 ? meterL : meterR;
-        auto fill = bar.withTop (bar.getBottom() - v * bar.getHeight());
-        juce::ColourGradient grad (Colours::mid, 0, bar.getBottom(), Colours::mute, 0, bar.getY(), false);
-        grad.addColour (0.8, Colours::solo);
-        g.setGradientFill (grad);
-        g.fillRect (fill);
     }
 }
 
 void ConsoleView::resized()
 {
-    auto r = getLocalBounds();
-    auto top = r.removeFromTop (46);
-    exportButton.setBounds (top.removeFromRight (200).reduced (10, 8));
-    stereo.setBounds (top.removeFromRight (110).reduced (6, 10));
-    autoLevel.setBounds (top.removeFromRight (130).reduced (6, 10));
-    blendInfo.setBounds (top.removeFromRight (300));
+    auto r = getLocalBounds().reduced (22, 0).withTrimmedBottom (16);
 
-    r.reduce (8, 8);
-    auto stripArea = r.removeFromLeft (numChannels * 124);
-    const int sw = stripArea.getWidth() / numChannels;
+    // Meter bridge.
+    bridgeArea = r.removeFromTop (172);
+    {
+        auto b = bridgeArea.withTrimmedTop (12).reduced (14, 12);
+        auto meters = b.removeFromRight (470);
+        const int mw = (meters.getWidth() - 14) / 2;
+        vuL.setBounds (meters.removeFromLeft (mw));
+        meters.removeFromLeft (14);
+        vuR.setBounds (meters);
+
+        b.removeFromRight (20);
+        auto controls = b.removeFromRight (260);
+        exportButton.setBounds (controls.removeFromBottom (40).reduced (4, 2));
+        controls.removeFromBottom (8);
+        auto row = controls.removeFromBottom (30);
+        autoLevel.setBounds (row.removeFromLeft (row.getWidth() / 2).reduced (4, 0));
+        stereo.setBounds (row.reduced (4, 0));
+        blendInfo.setBounds (controls.removeFromBottom (26));
+
+        plateArea = b.withSizeKeepingCentre (juce::jmin (520, b.getWidth() - 20), 92);
+    }
+
+    r.removeFromTop (8);
+    r.removeFromLeft (6);
+    r.removeFromRight (6);
+    r.removeFromBottom (6);
+    stripsArea = r.removeFromLeft (numChannels * 124);
+    auto sa = stripsArea;
+    const int sw = sa.getWidth() / numChannels;
     for (auto* s : strips)
-        s->setBounds (stripArea.removeFromLeft (sw));
+        s->setBounds (sa.removeFromLeft (sw));
 
-    r.removeFromLeft (8);
+    r.removeFromLeft (10);
     masterArea = r;
-    auto m = r.reduced (12);
-    response.setBounds (m.removeFromTop (190));
-    m.removeFromTop (30);
+    auto m = r.reduced (16);
+    m.removeFromTop (6);
+    response.setBounds (m.removeFromTop (180));
+    m.removeFromTop (34);
 
     pushArea = m.removeFromTop (76);
     {
@@ -764,13 +1035,13 @@ void ConsoleView::resized()
         push.setBounds (pa.removeFromLeft (kw));
         reso.setBounds (pa.removeFromLeft (kw));
     }
-    m.removeFromTop (34);
+    m.removeFromTop (38);
 
-    auto outCol = m.removeFromRight (110);
+    auto outCol = m.removeFromRight (90);
     m.removeFromRight (10);
-    eqArea = m.removeFromTop (290);
+    eqArea = m.removeFromTop (300);
     {
-        auto header = eqArea.withHeight (20).translated (0, -22);
+        auto header = eqArea.withHeight (20).translated (0, -24);
         eqOn.setBounds (header.removeFromRight (80));
         header.removeFromRight (6);
         flattenEq.setBounds (header.removeFromRight (50));
@@ -779,11 +1050,7 @@ void ConsoleView::resized()
         for (auto* s : eqSliders)
             s->setBounds (sliders.removeFromLeft (w));
     }
-
-    auto outArea = outCol.withTrimmedTop (-30);
-    outArea.removeFromTop (30);
-    meterArea = outArea.removeFromRight (22).withTrimmedBottom (20).reduced (0, 4);
-    output.setBounds (outArea);
+    output.setBounds (outCol.withHeight (m.getY() + m.getHeight() - outCol.getY()));
 
     if (exportPanel) exportPanel->setBounds (getLocalBounds());
 }
@@ -799,7 +1066,7 @@ IRConsoleEditor::IRConsoleEditor (IRConsoleProcessor& p) : AudioProcessorEditor 
     getConstrainer()->setFixedAspectRatio ((double) irc::ConsoleView::designW / irc::ConsoleView::designH);
     setResizeLimits (irc::ConsoleView::designW / 2, irc::ConsoleView::designH / 2,
                      irc::ConsoleView::designW * 2, irc::ConsoleView::designH * 2);
-    setSize (1184, 632);   // 80% default to fit laptop screens
+    setSize (1155, 705);   // 75% default to fit laptop screens
 }
 
 IRConsoleEditor::~IRConsoleEditor()

@@ -295,6 +295,33 @@ ChannelIRPtr loadIRFile (const juce::File& file, juce::String& error)
     return ir;
 }
 
+juce::Array<juce::File> findIRsInFolder (const juce::File& folder)
+{
+    auto files = folder.findChildFiles (juce::File::findFiles, false, "*.wav;*.wave;*.aif;*.aiff;*.flac");
+    struct NaturalOrder
+    {
+        static int compareElements (const juce::File& a, const juce::File& b)
+        {
+            return a.getFileName().compareNatural (b.getFileName());
+        }
+    } order;
+    files.sort (order);
+    return files;
+}
+
+juce::File stepIR (const juce::File& current, int delta, int* positionOut, int* countOut)
+{
+    if (! current.existsAsFile()) return {};
+    const auto files = findIRsInFolder (current.getParentDirectory());
+    const int count = files.size();
+    int idx = files.indexOf (current);
+    if (count == 0 || idx < 0) return {};
+    idx = ((idx + delta) % count + count) % count;
+    if (positionOut) *positionOut = idx;
+    if (countOut) *countOut = count;
+    return files[idx];
+}
+
 bool writeWav (const juce::File& file, const juce::AudioBuffer<float>& ir, double sampleRate, int bitDepth, juce::String& error)
 {
     file.deleteFile();

@@ -21,6 +21,7 @@ All 8 channels are rendered into **one** blended IR in a background thread, and 
 | Control | Range | Notes |
 |---|---|---|
 | LOAD IR | WAV / AIFF / FLAC, mono or stereo, any sample rate | Click, or drag a file onto the strip. Click a loaded IR for Load / Clear / Reset. IRs are resampled with a windowed-sinc resampler. |
+| **<  >** browse | the other IRs in the same folder | Step through the IR's folder like moving the mic: use the arrows, or scroll over the IR name or waveform. The waveform shows the position (e.g. 3 / 24). Clicking the IR name opens the folder list and a **Library** submenu with the neighbouring folders (other mics and cabs). Channel settings are kept as you browse. |
 | HPF / LPF | 20 Hz–1 kHz / 1–20 kHz | 12 dB/oct. Fully counter-clockwise (HPF) or clockwise (LPF) means off. |
 | HF | ±15 dB shelf, 1.5–16 kHz | |
 | MF | ±15 dB bell, 200 Hz–8 kHz, Q 0.3–6 | |
@@ -44,6 +45,7 @@ Double-click any control to reset it.
 
   It runs 2x oversampled with linear-phase filters, adding 49 samples of latency, which the plugin reports to the host.
 - **MASTER 10-BAND GRAPHIC EQ**: a 560-style graphic EQ. Bands are at 31, 63, 125, 250, 500, 1k, 2k, 4k, 8k and 16k, each ±12 dB. Q is proportional, so bands are broad at small settings and tighten as you push them. **FLAT** resets all bands and **EQ IN** bypasses the EQ.
+- **VU meters**: backlit analog L/R meters on the meter bridge, with VU ballistics (about 300 ms) and a peak LED that lights above −1 dBFS. 0 VU = −18 dBFS RMS.
 - **Response display**: shows the frequency response of the blended IR (L and R), plus the master EQ.
 
 ## Exporting

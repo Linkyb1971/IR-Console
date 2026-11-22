@@ -156,6 +156,29 @@ int main()
         CHECK (reload != nullptr && reload->data.getNumChannels() == 2, "exported stereo blend loads back as a channel IR");
     }
 
+    std::cout << "Library browsing\n";
+    {
+        juce::String err;
+        auto lib = dir.getChildFile ("Library");
+        auto sm57 = lib.getChildFile ("SM57"), r121 = lib.getChildFile ("R121");
+        sm57.createDirectory(); r121.createDirectory();
+        for (auto n : { "SM57 Cap 10in", "SM57 Cap 2in", "SM57 Cap 1in", "SM57 Edge 1in" })
+            writeWav (sm57.getChildFile (juce::String (n) + ".wav"), a->data, 48000, 24, err);
+        writeWav (r121.getChildFile ("R121 Cap 1in.wav"), b->data, 48000, 24, err);
+        sm57.getChildFile ("notes.txt").replaceWithText ("not an IR");
+
+        auto files = findIRsInFolder (sm57);
+        juce::StringArray names; for (auto& f : files) names.add (f.getFileNameWithoutExtension());
+        CHECK (names.joinIntoString (",") == "SM57 Cap 1in,SM57 Cap 2in,SM57 Cap 10in,SM57 Edge 1in",
+               "folder listed in natural order, non-audio skipped (" + names.joinIntoString (",") + ")");
+        int pos = -1, count = 0;
+        auto next = stepIR (sm57.getChildFile ("SM57 Cap 2in.wav"), 1, &pos, &count);
+        CHECK (next.getFileName() == "SM57 Cap 10in.wav" && pos == 2 && count == 4, "next mic position");
+        CHECK (stepIR (sm57.getChildFile ("SM57 Edge 1in.wav"), 1).getFileName() == "SM57 Cap 1in.wav", "wraps past the end");
+        CHECK (stepIR (sm57.getChildFile ("SM57 Cap 1in.wav"), -1).getFileName() == "SM57 Edge 1in.wav", "wraps before the start");
+        CHECK (stepIR (sm57.getChildFile ("missing.wav"), 1) == juce::File(), "missing original file disables browsing");
+    }
+
     std::cout << "Processor\n";
     {
         IRConsoleProcessor proc;
@@ -233,7 +256,14 @@ int main()
         setP (IRConsoleProcessor::chId (1, "hpf"), 90.0f); setP (IRConsoleProcessor::chId (2, "mute"), 1.0f);
         setP (IRConsoleProcessor::eqId (1), 3.0f); setP (IRConsoleProcessor::eqId (4), -4.0f); setP (IRConsoleProcessor::eqId (7), 2.5f);
         setP ("push", 35.0f);
+        CHECK (proc.loadIR (0, dir.getChildFile ("Library/SM57/SM57 Cap 2in.wav")).isEmpty(), "load IR from library folder");
         juce::Thread::sleep (300);
+        for (int blk = 0; blk < 60; ++blk)   // some programme so the VU needles have something to show
+        {
+            for (int c = 0; c < 2; ++c) for (int i = 0; i < 512; ++i)
+                buf.setSample (c, i, 0.25f * std::sin ((blk * 512 + i) * (c == 0 ? 0.031f : 0.023f)));
+            proc.processBlock (buf, midi);
+        }
         std::unique_ptr<juce::AudioProcessorEditor> ed (proc.createEditor());
         ed->setSize (irc::ConsoleView::designW, irc::ConsoleView::designH);
         for (int i = 0; i < 20; ++i) juce::MessageManager::getInstance()->runDispatchLoopUntil (20);

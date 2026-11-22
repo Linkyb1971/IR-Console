@@ -199,7 +199,10 @@ void IRConsoleProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::M
         buffer.applyGain (0, 0, n, 0.5f);
     }
     for (int ch = 0; ch < 2; ++ch)
+    {
         outPeak[ch] = juce::jmax (outPeak[ch].load() * 0.9f, work.getMagnitude (ch, 0, n));
+        outRms[ch] = work.getRMSLevel (ch, 0, n);
+    }
 }
 
 //==============================================================================

@@ -41,11 +41,15 @@ public:
 private:
     void choose();
     void showMenu();
+    void step (int delta);
+    void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails&) override;
     void loadFile (const juce::File&);
 
     IRConsoleProcessor& proc;
     const int index;
-    juce::TextButton irButton;
+    juce::TextButton irButton, prevButton { "<" }, nextButton { ">" };
+    juce::String positionText;   // "3 / 24" within the IR's folder
+    float wheelAccum = 0.0f;
     juce::Rectangle<int> thumbArea;
     juce::Path thumbPath;
     bool dragOver = false, isStereoIR = false;
@@ -91,6 +95,21 @@ private:
     std::unique_ptr<juce::FileChooser> chooser;
 };
 
+/** Backlit analog VU meter with real VU ballistics (~300 ms) and a peak LED.
+    0 VU = -18 dBFS RMS. */
+class VUMeter : public juce::Component
+{
+public:
+    explicit VUMeter (juce::String channelName) : name (std::move (channelName)) {}
+    void paint (juce::Graphics&) override;
+    void update (float rmsLinear, float peakLinear, float dtSeconds);
+    static float positionForDb (float vuDb);   // 0..1 across the scale
+private:
+    juce::String name;
+    float pos = 0.0f, vel = 0.0f;
+    float peakHold = 0.0f;
+};
+
 /** The whole console at its design size; the editor scales it. */
 class ConsoleView : public juce::Component, private juce::Timer
 {
@@ -98,7 +117,7 @@ public:
     explicit ConsoleView (IRConsoleProcessor&);
     void paint (juce::Graphics&) override;
     void resized() override;
-    static constexpr int designW = 1480, designH = 790;
+    static constexpr int designW = 1540, designH = 940;
 
 private:
     void timerCallback() override;
@@ -114,8 +133,8 @@ private:
     std::unique_ptr<SliderAttachment> outputAttachment;
     juce::TextButton exportButton { "EXPORT BLENDED IR" }, flattenEq { "FLAT" };
     juce::Label blendInfo;
-    juce::Rectangle<int> masterArea, eqArea, meterArea, pushArea;
-    float meterL = 0, meterR = 0;
+    juce::Rectangle<int> masterArea, eqArea, pushArea, bridgeArea, plateArea, stripsArea;
+    VUMeter vuL { "LEFT" }, vuR { "RIGHT" };
     int lastIRVersion = -1, lastDisplayVersion = -1;
     std::unique_ptr<ExportPanel> exportPanel;
 };

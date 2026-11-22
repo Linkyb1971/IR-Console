@@ -62,6 +62,7 @@ public:
     static constexpr int displayPoints = 240;
 
     float getOutputPeak (int ch) const { return outPeak[ch].load(); }
+    float getOutputRms (int ch) const { return outRms[ch].load(); }
     float getInputPeak() const { return inPeak.load(); }
 
     juce::AudioProcessorValueTreeState apvts;
@@ -94,6 +95,7 @@ private:
     juce::AudioBuffer<float> work;
     juce::SmoothedValue<float> inGain, outGain;
     std::atomic<float> outPeak[2] { 0.0f, 0.0f };
+    std::atomic<float> outRms[2] { 0.0f, 0.0f };
     std::atomic<float> inPeak { 0.0f };
 
     // cached raw parameter pointers

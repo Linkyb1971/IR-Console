@@ -72,6 +72,13 @@ std::vector<float> computeResponseDb (const float* ir, int length, double sample
 /** Loads an audio file into a ChannelIR (any format JUCE can read: WAV, AIFF, FLAC...). */
 ChannelIRPtr loadIRFile (const juce::File& file, juce::String& error);
 
+/** All IR files (WAV/AIFF/FLAC) in a folder, in natural order ("2in" before "10in"). */
+juce::Array<juce::File> findIRsInFolder (const juce::File& folder);
+
+/** The IR a step of `delta` away from `current` within its folder (wraps around).
+    Returns an invalid File if `current` no longer exists on disk. */
+juce::File stepIR (const juce::File& current, int delta, int* positionOut = nullptr, int* countOut = nullptr);
+
 /** Writes an IR as a WAV file. bitDepth: 16, 24 or 32 (float). */
 bool writeWav (const juce::File& file, const juce::AudioBuffer<float>& ir, double sampleRate, int bitDepth, juce::String& error);
 } // namespace irc
