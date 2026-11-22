@@ -627,8 +627,11 @@ ConsoleView::ConsoleView (IRConsoleProcessor& p)
     exportButton.onClick = [this]
     {
         exportPanel = std::make_unique<ExportPanel> (proc);
-        exportPanel->onClose = [this] { juce::MessageManager::callAsync ([safe = juce::Component::SafePointer<ConsoleView> (this)]
-                                                                         { if (safe != nullptr) safe->exportPanel.reset(); }); };
+        juce::Component::SafePointer<ConsoleView> safeView (this);
+        exportPanel->onClose = [safeView]
+        {
+            juce::MessageManager::callAsync ([safeView] { if (safeView != nullptr) safeView->exportPanel.reset(); });
+        };
         addAndMakeVisible (*exportPanel);
         exportPanel->setBounds (getLocalBounds());
     };

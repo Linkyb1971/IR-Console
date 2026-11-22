@@ -10,13 +10,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos-latest
             name: macOS
             extra: -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
           - os: windows-latest
             name: Windows
             extra: ""
-          - os: ubuntu-24.04
+          - os: ubuntu-latest
             name: Linux
             extra: ""
     runs-on: ${{ matrix.os }}
