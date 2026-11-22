@@ -1,3 +1,4 @@
 build*/
 JUCE/
 .DS_Store
+dist/
