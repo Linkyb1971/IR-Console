@@ -189,7 +189,7 @@ void ChannelStrip::showMenu()
     juce::PopupMenu m;
     const auto ir = proc.getIR (index);
     const juce::File current = ir != nullptr ? juce::File (ir->path) : juce::File();
-    constexpr int fileBase = 1000, maxFiles = 3000;
+    static constexpr int fileBase = 1000, maxFiles = 3000;
 
     auto addFolder = [&] (juce::PopupMenu& menu, const juce::File& folder)
     {
